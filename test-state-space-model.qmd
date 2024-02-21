@@ -1,0 +1,139 @@
+---
+title: "Test_State-Space Model"
+author: "Tzu-Yao Lin"
+format: html
+editor: visual
+---
+
+Reference: [State Space Models in Stan](https://jrnold.github.io/ssmodels-in-stan/)
+
+```{r}
+#| label: packages-and-setting
+
+library(tidyverse)
+theme_set(theme_minimal(base_size = 14))
+library(cmdstanr)
+register_knitr_engine(override = FALSE)
+library(posterior)
+library(bayesplot)
+color_scheme_set("red")
+bayesplot_theme_set(theme_minimal(base_size = 14))
+library(loo)
+```
+
+```{r}
+cmdstan_path()
+cmdstan_version()
+```
+
+```{cmdstan}
+#| label: state-space model
+#| cache: TRUE
+#| output.var: mod1
+
+data {
+  int<lower=1> T;
+  vector[T] y;
+  real m0;
+  cov_matrix[1] C0;
+}
+
+parameters {
+  real x0;
+  vector[T] x;
+  cov_matrix[1] W;
+  cov_matrix[1] V;
+}
+
+// transformed parameters {}
+
+model {
+  x0 ~ normal(m0, sqrt(C0[1, 1]));
+  
+  for (t in 1:T) {
+    y[t] ~ normal(x[t], sqrt(V[1, 1]));
+  }
+  
+  x[1] ~ normal(x0, sqrt(W[1, 1]));
+  
+  for (t in 2:T) {
+    y[t] ~ normal(x[t-1], sqrt(W[1, 1]));
+  }
+  
+}
+
+// generated quantities {}
+```
+
+```{r}
+set.seed(1294)
+
+model_data <- list(N = length(assignment),
+                   x = assignment,
+                   y = propstudents,
+                   no_predictions = no_assignments,
+                   x_predictions = x_predictions)
+
+fit <- ssm$sample(data = model_data, 
+                  seed = 1294,
+                  chains = 4,
+                  parallel_chain = 4,
+                  refresh = 500, 
+                  show_messages=FALSE)
+```
+
+```{cmdstan}
+#| label: "test model"
+#| output.var: mod
+
+data {
+  int<lower=0> N;
+  array[N] int<lower=0,upper=1> y;
+}
+parameters {
+  real<lower=0,upper=1> theta;
+}
+model {
+  theta ~ beta(1,1);  // uniform prior on interval 0,1
+  y ~ bernoulli(theta);
+}
+```
+
+```{r}
+mod$print()
+mod$exe_file()
+mod$variables()
+
+data_list <- list(N = 10, y = c(0,1,0,0,0,0,0,0,0,1))
+
+fit <- mod$sample(
+  data = data_list,
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  refresh = 500 # print update every 500 iters
+)
+
+fit$summary()
+
+fit$cmdstan_summary()
+```
+
+```{r}
+draws_arr <- fit$draws() # or format="array"
+str(draws_arr)
+draws_arr
+draws_df <- fit$draws(format = "df")
+str(draws_df)
+draws_df
+
+class(draws_df)
+
+mcmc_hist(fit$draws("theta"))
+```
+
+```{r}
+fit$sampler_diagnostics()
+
+fit$diagnostic_summary()
+```
