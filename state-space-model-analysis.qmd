@@ -2,7 +2,6 @@
 title: "State-Space Model Analysis"
 author: "Tzu-Yao Lin"
 date: last-modified
-editor: visual
 bibliography: references.bib
 csl: apa.csl
 execute:
@@ -129,6 +128,26 @@ ggplot(subdata, aes(x = DateTime, y = Score, color = Affect)) +
                    limits = as_datetime(c(1, 8) * 86400)) +
   scale_color_manual(values = pos_neg_color) +
   facet_grid(rows = "Subject") 
+
+```
+```{r}
+data %>% 
+  filter(Subject %in% 1:25) %>% 
+  filter(Affect == "Pos") |> 
+  # mutate(DateTime = as_datetime(ymd_hms(paste(as_date(as.double(Day)), 
+  #                                             as.character(Time))))) %>% 
+  # as_tsibble(key = c(Subject, Affect), 
+  #            index = DateTime) |> 
+  mutate(Time = 1:n(), .by = Subject ) |> 
+ggplot(aes(x = Time, y = Score, color = Subject)) + 
+  geom_line(alpha = 0.7, linewidth = 1) + #geom_point() +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_continuous(breaks = seq(0, 80, 5)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+  # scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+  #                  labels = paste("Day", 1:7),
+  #                  limits = as_datetime(c(1, 8) * 86400)) 
 
 ```
 
@@ -605,7 +624,7 @@ data_predict <- data %>%
   mutate(Time_Index = 1:n()) %>% 
   ungroup() %>% 
   pivot_longer(c("Pos", "Neg"), names_to = "Affect", values_to = "Score") %>% 
-  left_join(y_hat_summary)
+  left_join(bind_rows(y_hat_PA_summary, y_hat_NA_summary))
 
 for (i in 1:10) {
   g <- data_predict %>% 
@@ -623,7 +642,7 @@ for (i in 1:10) {
                      limits = as_datetime(c(1, 8) * 86400)) +
     facet_grid(Subject ~ .) 
   
-  ggsave(filename = str_glue("plots/mssm2/predict_{from}-{to}.png",
+  ggsave(filename = str_glue("plots/mssm1/predict_{from}-{to}.png",
                              from = 10 * (i - 1) + 1, to = 10 * i),
          plot = g, width = 7, height = 14)
 }

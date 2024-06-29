@@ -1,6 +1,567 @@
 ---
 title: "State Space Model Analysis 2"
 author: "Tzu-Yao Lin"
-format: html
-editor: visual
+date: last-modified
+bibliography: references.bib
+csl: apa.csl
+execute:
+  warning: false
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    self-contained: true
+    code-fold: false
+    code-tools: true
 ---
+
+# Load Data and Setting
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+theme_set(theme_bw(base_size = 14))
+pos_neg_color <- rev(scales::hue_pal()(2))
+library(lubridate)
+library(tsibble)
+library(cmdstanr)
+register_knitr_engine(override = TRUE)
+library(posterior)
+library(bayesplot)
+color_scheme_set("red")
+bayesplot_theme_set(theme_bw(base_size = 14))
+# library(loo)
+
+source("custom_functions.R")
+```
+
+```{r}
+#| label: data-preprocessing
+
+rawdata <- read_tsv("data_1beep_no1st beep_annette.tsv")
+
+data <- rawdata %>% 
+  mutate(Pos = PA, 
+         Neg = `NA`,
+         Date_Time = ymd_hms(str_glue("{year}-{month}-{day} {hour}:{min}:{sec}"), tz = "CET"),
+         Date = as_date(Date_Time),
+         Time = hms::as_hms(Date_Time),
+         WDay = wday(Date, label = TRUE),
+         Subject = factor(cumsum(PpID != lag(PpID, default = 0))), 
+         .keep = "none") %>% 
+  group_by(Subject) %>% 
+  mutate(Day = factor(cumsum(Date != lag(Date, default = origin)))) %>% 
+  group_by(Subject, Date) %>% 
+  mutate(Moment = factor(1:n())) %>% 
+  ungroup() %>% 
+  pivot_longer(cols = c(Pos, Neg), names_to = "Affect", values_to = "Score") %>% 
+  mutate(DateTime = as_datetime(ymd_hms(paste(as_date(as.double(Day)), 
+                                              as.character(Time))))) %>% 
+  as_tsibble(key = c(Subject, Affect), 
+             index = DateTime)
+
+rmarkdown::paged_table(data)
+
+```
+
+
+# State-Space Model
+## Model Specification
+
+According to @schuurman2019 **Measurement Error Vector Autoregressive of Order 1 Model** (MEVAR(1)), the model can be written as follows. However, here, I only use it for a single variable such as positive affect or negative affect.
+
+- Level 1 model (within subject)
+  - Observation equation
+
+$$
+\begin{align*}
+  y_{it} &= \mu_i + \theta_{it} + \epsilon_{it} \\
+  \epsilon_{it} &\sim N(0, \sigma_{\epsilon i}^2)
+\end{align*}
+$$
+
+  -   State equation
+
+$$
+\begin{align*}
+  \theta_{it} &= \phi_i \theta_{i t-1} + \omega_{it} \\
+  \omega_{it} &\sim \mathcal{N}(0, \sigma_{\omega i}^2)
+\end{align*}
+$$
+
+
+- Level 2 model (between subject)
+
+$$
+\begin{align*}
+  \mu_i &\sim \mathcal{N}(\gamma_\mu, \psi_\mu^2) \\
+  
+  <lower=-1, upper=1>
+  \phi_i &\sim \mathcal{N}(\gamma_\phi, \psi_\phi^2) \\
+  \sigma_{\epsilon i}^2 &\sim \text{Inverse-Gamma}(\alpha_{\sigma_\epsilon}, \beta_{\sigma_\epsilon}) \\
+  \sigma_{\omega i}^2 &\sim \text{Inverse-Gamma}(\alpha_{\sigma_\omega}, \beta_{\sigma_\omega}) \\
+  
+  \sigma_{\epsilon i}^2 &\sim Uniform (0, upper) \\
+  real<lower=0> upper
+  upper &\sim Normal(10, scale=30)
+   
+\end{align*}
+$$
+where the mean of the $\sigma_{\epsilon i}^2$ is $\gamma_{\sigma_\epsilon^2} = \frac{\beta_{\sigma_\epsilon^2}}{\alpha_{\sigma_\epsilon^2} - 1}$ for $\alpha_{\sigma_\epsilon^2} > 1$, and the variance of the $\sigma_{\epsilon i} ^2$ is $\psi_{\sigma_\epsilon^2}^2 =  \frac{\beta_{\sigma_\epsilon}^2}{(\alpha_{\sigma_\epsilon} - 1)^2(\alpha_{\sigma_\epsilon} - 2)}$ for $\alpha_{\sigma_\epsilon^2} > 2$.
+
+## Reliability
+
+-   **Reliability for systematic between-subject difference**
+
+$$
+R^B = \frac{\psi^2_\mu}{Var(y)} = \frac{\psi^2_\mu}{\psi^2_\mu + E_{i}[\tau_i]+ \gamma_{\sigma_\epsilon^2}} 
+$$
+
+-   **Reliability for within-subject fluctuations**
+
+$$
+R_{i}^W = \frac{\tau_i}{Var(y_{i})} = \frac{\tau_i}{\tau_i + \sigma_{\epsilon i}^2}
+$$
+where $\tau_i = \frac{\sigma_{\omega i}^2}{1 - \phi_i^2}$.
+
+## Bayesian Analysis
+
+```{cmdstan}
+#| label: mssm-single-stan
+#| output.var: mssm1
+#| eval: false
+#| filename: "multilevel-ssm-single.stan"
+
+{{< include stan/multilevel-ssm-single.stan >}}
+```
+
+```{r}
+#| label: mssm1-PA-fit
+#| eval: false
+
+selected_sub <-  c(9, 20, 36, 57, 76, 85)
+
+data_list_PA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos) %>% 
+  drop_na(Pos) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Pos, rep(Inf, z - y))
+                             })) 
+  
+
+
+mssm1_PA <- cmdstan_model("stan/multilevel-ssm-single.stan") 
+
+
+mssm1_PA_data <- lst(N = nrow(data_list_PA),
+                  `T` = map(data_list_PA$data, nrow),
+                  max_T = max(data_list_PA$`T`),
+                  #P = 2,
+                  y = data_list_PA$data_padding)
+
+mssm1_PA_fit <- mssm1_PA$sample(data = mssm1_PA_data, 
+                                seed = 1295,
+                                chains = 8,
+                                parallel_chains = 8,
+                                iter_warmup = 1000,
+                                iter_sampling = 1500,
+                                refresh = 1000, 
+                                show_messages = FALSE)
+
+#mssm1_PA_fit$save_object(file = "stan/multilevel-ssm-PA-fit.RDS")
+```
+
+
+
+```{r}
+#| label: mssm1-NA-fit
+#| eval: false
+
+data_list_NA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Neg) %>% 
+  drop_na(Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Neg, rep(Inf, z - y))
+                             })) 
+
+mssm1_NA <- cmdstan_model("stan/multilevel-ssm-single.stan") 
+
+mssm1_NA_data <- lst(N = nrow(data_list_NA),
+                     `T` = map(data_list_NA$data, nrow),
+                     max_T = max(data_list_NA$`T`),
+                     #P = 2,
+                     y = data_list_NA$data_padding)
+
+mssm1_NA_fit <- mssm1_NA$sample(data = mssm1_NA_data, 
+                                seed = 1295,
+                                chains = 8,
+                                parallel_chains = 8,
+                                iter_warmup = 1000,
+                                iter_sampling = 1500,
+                                refresh = 1000, 
+                                show_messages = FALSE)
+```
+
+
+
+
+```{r}
+a <- mssm1_PA_fit$summary()
+View(a)
+
+mssm1_PA_fit$draws(variables = c("sigma_epsilon", "sigma_omega")) %>% 
+  mcmc_trace() 
+
+mssm1_PA_fit$draws(variables = c("rel_W", "rel_B")) %>% 
+  mcmc_trace() 
+
+mssm1_PA_fit$draws(variables = "psi_mu") %>% mcmc_trace()
+
+mssm1_PA_fit$draws(variables = "phi") %>% mcmc_trace()
+
+```
+
+```{r}
+b <- mssm1_NA_fit$summary()
+View(b)
+
+mssm1_NA_fit$draws(variables = c("sigma_epsilon", "sigma_omega")) %>% 
+  mcmc_trace() 
+
+mssm1_NA_fit$draws(variables = c("rel_W", "rel_B")) %>% 
+  mcmc_trace() 
+
+mssm1_NA_fit$draws(variables = "psi_mu") %>% mcmc_trace()
+
+mssm1_NA_fit$draws(variables = "phi") %>% mcmc_trace()
+```
+
+
+
+```{r}
+#| label: mssm1-fitting-trends
+#| eval: false
+
+y_hat_PA_summary <- mssm1_PA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[2])))
+  
+
+y_hat_NA_summary <- mssm1_NA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[2])))
+
+
+data_predict <- data %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  group_by(Subject) %>% 
+  mutate(Time_Index = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_longer(c("Pos", "Neg"), names_to = "Affect", values_to = "Score") %>% 
+  left_join(bind_rows(y_hat_PA_summary, y_hat_NA_summary))
+
+data_predict %>% 
+  filter(Subject %in% selected_sub) %>% 
+  ggplot(aes(x = DateTime, y = Score)) + 
+  geom_line(aes(color = Affect)) + 
+  geom_point(aes(color = Affect)) +
+  scale_color_manual(values = pos_neg_color) +
+  geom_line(aes(y = mean, group = Affect), linetype = "dashed") +
+  geom_ribbon(aes(ymin = q5, ymax = q95, group = Affect), alpha = 0.25) +
+  geom_hline(yintercept = c(0, 100), color = "forestgreen") +
+  scale_y_continuous(limits = c(-20, 120)) +
+  scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                   labels = paste("Day", 1:7),
+                   limits = as_datetime(c(1, 8) * 86400)) +
+  facet_grid(Subject ~ .) 
+  
+```
+
+
+
+```{r}
+rel_W_PA_draws <- mssm1_PA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos")
+rel_W_NA_draws <- mssm1_NA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg")
+rel_W_draws <- bind_rows(rel_W_PA_draws, rel_W_NA_draws)
+
+ggplot(rel_W_draws, aes(x = 1, y = value, fill = Affect)) +
+  geom_split_violin() +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = pos_neg_color) +
+  facet_wrap(~ Subject, ncol = 10)
+```
+
+
+```{r}
+rel_B_PA_draws <- mssm1_PA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(`rel_B[1]` = `rel_B`, .keep = "unused")
+rel_B_NA_draws <- mssm1_NA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(`rel_B[2]` = `rel_B`, .keep = "unused")
+rel_B_draws <- left_join(rel_B_PA_draws, rel_B_NA_draws) %>% 
+  mutate(rel_B_diff = `rel_B[1]` - `rel_B[2]`)
+
+mcmc_areas(rel_B_draws,
+           prob = 0.8,
+           prob_outer = 0.99) +
+  coord_cartesian(xlim = c(-1.5, 1.5))
+```
+
+
+
+
+## Test
+
+
+Use previous Stan code but fit Positive affect and Negarive affect separately.
+
+```{cmdstan}
+#| label: mssm-ssm
+#| output.var: mssm
+#| eval: false
+#| filename: "multilevel-ssm-ver3.stan"
+
+{{< include stan/multilevel-ssm-ver3.stan >}}
+```
+
+
+
+
+
+```{r}
+.data_list <- data %>% as_tibble() %>%
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score)
+
+data_list_PA <- .data_list %>% 
+  select(Pos) %>%
+  drop_na(Pos) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               bind_rows(x, 
+                                         tibble(Pos = rep(Inf, z - y))) %>% 
+                                 t()
+                             }))
+
+
+data_list_NA <- .data_list %>% 
+  select(Neg) %>%
+  drop_na(Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               bind_rows(x, 
+                                         tibble(Neg = rep(Inf, z - y))) %>% 
+                                 t()
+                             }))
+
+data_list_NA
+
+mssm_PA <- cmdstan_model("stan/multilevel-ssm-ver3.stan")
+
+mssm_PA_data <- lst(N = nrow(data_list_PA),
+                    `T` = map(data_list_PA$data, nrow),
+                    max_T = max(data_list_PA$`T`),
+                    P = 1,
+                    y = data_list_PA$data_padding)
+
+mssm_PA_fit <- mssm_PA$sample(data = mssm_PA_data, 
+                        seed = 20240320,
+                        chains = 8,
+                        parallel_chains = 8,
+                        iter_sampling = 1500,
+                        refresh = 1000, 
+                        show_messages = TRUE)
+#mssm_fit$save_object(file = "stan/multilevel-ssm-fit.RDS")
+```
+
+```{r}
+pa_summary <- mssm_PA_fit$summary() 
+View(pa_summary)
+
+mssm_PA_fit$draws(variables = c("R", "Q")) %>%  mcmc_trace() 
+
+mssm_PA_fit$draws(variables = "mu") %>% mcmc_trace()
+
+mssm_PA_fit$draws(variables = "Phi") %>% mcmc_trace()
+
+mssm_PA_fit$draws(variables = c("gamma_mu", "gamma_Phi")) %>% mcmc_trace()
+
+mssm_PA_fit$draws(variables = c("rel_W", "rel_B")) %>% 
+  mcmc_trace() + coord_cartesian(ylim = c(0, 1))
+```
+
+```{r}
+data_list_NA <- .data_list %>% 
+  select(Neg) %>%
+  drop_na(Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               bind_rows(x, 
+                                         tibble(Neg = rep(Inf, z - y))) %>% 
+                                 t()
+                             }))
+
+mssm_NA <- cmdstan_model("stan/multilevel-ssm-ver3.stan")
+
+mssm_NA_data <- lst(N = nrow(data_list_NA),
+                    `T` = map(data_list_NA$data, nrow),
+                    max_T = max(data_list_NA$`T`),
+                    P = 1,
+                    y = data_list_NA$data_padding)
+
+mssm_NA_fit <- mssm_NA$sample(data = mssm_NA_data, 
+                        seed = 20240320,
+                        chains = 8,
+                        parallel_chains = 8,
+                        iter_sampling = 1500,
+                        refresh = 1000, 
+                        show_messages = TRUE)
+```
+
+```{r}
+na_summary <- mssm_NA_fit$summary() 
+View(na_summary)
+
+mssm_NA_fit$draws(variables = c("R", "Q")) %>%  mcmc_trace() 
+
+mssm_NA_fit$draws(variables = "mu") %>% mcmc_trace()
+
+mssm_NA_fit$draws(variables = "Phi") %>% mcmc_trace()
+
+mssm_NA_fit$draws(variables = c("rel_W", "rel_B")) %>% 
+  mcmc_trace() + coord_cartesian(ylim = c(0, 1))
+```
+```{r}
+y_hat_PA_summary <- mssm_PA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[3])))
+  
+
+y_hat_NA_summary <- mssm_NA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[3])))
+
+
+data_predict <- data %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  group_by(Subject) %>% 
+  mutate(Time_Index = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_longer(c("Pos", "Neg"), names_to = "Affect", values_to = "Score") %>% 
+  left_join(bind_rows(y_hat_PA_summary, y_hat_NA_summary))
+
+data_predict %>% 
+  filter(Subject %in% selected_sub) %>% 
+  ggplot(aes(x = DateTime, y = Score)) + 
+  geom_line(aes(color = Affect)) + 
+  geom_point(aes(color = Affect)) +
+  scale_color_manual(values = pos_neg_color) +
+  geom_line(aes(y = mean, group = Affect), linetype = "dashed") +
+  geom_ribbon(aes(ymin = q5, ymax = q95, group = Affect), alpha = 0.25) +
+  geom_hline(yintercept = c(0, 100), color = "forestgreen") +
+  scale_y_continuous(limits = c(-20, 120)) +
+  scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                   labels = paste("Day", 1:7),
+                   limits = as_datetime(c(1, 8) * 86400)) +
+  facet_grid(Subject ~ .) 
+  
+  
+```
+
+```{r}
+rel_W_PA_draws <- mssm_PA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos")
+rel_W_NA_draws <- mssm_NA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg")
+rel_W_draws <- bind_rows(rel_W_PA_draws, rel_W_NA_draws)
+
+ggplot(rel_W_draws, aes(x = 1, y = value, fill = Affect)) +
+  geom_split_violin() +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = pos_neg_color) +
+  facet_wrap(~ Subject, ncol = 10)
+```
+
+
+```{r}
+rel_B_PA_draws <- mssm_PA_fit$draws(variables = "rel_B", format = "df")
+rel_B_NA_draws <- mssm_NA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(`rel_B[2]` = `rel_B[1]`, .keep = "unused")
+rel_B_draws <- left_join(rel_B_PA_draws, rel_B_NA_draws) %>% 
+  mutate(rel_B_diff = `rel_B[1]` - `rel_B[2]`)
+
+mcmc_areas(rel_B_draws,
+           prob = 0.8,
+           prob_outer = 0.99) +
+  coord_cartesian(xlim = c(-1.5, 1.5))
+```
+

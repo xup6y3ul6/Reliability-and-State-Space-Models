@@ -31,7 +31,7 @@ functions {
     int k;
     n = rows(A);
     k = 1;
-    vector[n * (n + 1) / 2] v;
+    vector[n * (n + 1) %/% 2] v;
     
     for (c in 1:n) {
       for (r in c:n) {
@@ -44,7 +44,7 @@ functions {
 
   int index_of_diag_lower_tri(int i, int n){
     array[n, n] int index_mat = rep_array(0, n, n);
-    int m = n * (n + 1) / 2;
+    int m = n * (n + 1) %/% 2;
     array[m] int index_vec = linspaced_int_array(m, 1, m);
     int k = 1;
     

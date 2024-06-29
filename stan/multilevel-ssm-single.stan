@@ -1,83 +1,102 @@
-#include ssm-function.stan
+//include ssm-function.stan
 
 data {
   int<lower=1> N; // number of subjects
   array[N] int<lower=1> T; // number of observation for each subject
   int<lower=1> max_T; // maximum number of observation
-  int<lower=1> P; // number of affects
-  array[N] matrix[P, max_T] y; // observations 
-  array[N] vector[P] m_0; // prior mean of the intial state
-  array[N] cov_matrix[P] C_0; // prior covariance of the intial state
+  array[N] vector[max_T] y; // observations 
+}
+
+transformed data {
+  array[N] real m_0; // prior mean of the intial state
+  array[N] real<lower=0> c_0; // prior sd of the intial state
+  
+  // assign the mean and variance for the initial latent state's prior
+  m_0 = rep_array(0.0, N);
+  c_0 = rep_array(33.0, N);
+  
 }
 
 parameters {
-  array[N] vector[P] mu; // ground mean/trane
-  array[N] vector[P] theta_0; // initial latent state
-  array[N] matrix[P, max_T] theta; // latent states
-  array[N] matrix[P, P] Phi; // autoregressive parameters
-  array[N] cov_matrix[P] R; // covariance of the measurment error
-  array[N] cov_matrix[P] Q; // covariance of the innovation noise
+  // parameters
+  array[N] real mu; // ground mean/trane
+  array[N] real theta_0; // initial latent state
+  array[N] vector[max_T] theta; // latent states
+  array[N] real phi; // autoregressive parameters
+  array[N] real<lower=0> sigma_epsilon; // sd of the measurment error
+  array[N] real<lower=0> sigma_omega; // sd of the innovation noise
   
-  vector[P] gamma_mu; // prior mean of the ground mean
-  cov_matrix[P] Psi_mu; // prior covariance of the ground mean
-  vector[P * P] gamma_Phi; // prior mean of the autoregressive parameters
-  cov_matrix[P * P] Psi_Phi; // prior covariance of the autoregressive parameters
-  vector[P * (P + 1) / 2] gamma_R; // prior mean of the covariance of the measurement error
-  vector[P * (P + 1) / 2] diag_Psi_R; // prior covariance of the covariance of the measurement error
-  vector[P * (P + 1) / 2] gamma_Q; // prior mean of the covariance of the innovation noise
-  vector[P * (P + 1) / 2] diag_Psi_Q; // prior covariance of the covariance of innovation noise
+  // hyperparameters
+  real gamma_mu; // prior mean of the ground mean
+  real<lower=0> psi_mu; // prior sd of the ground mean
+  real gamma_phi; // prior mean of the autoregressive parameters
+  real<lower=0> psi_phi; // prior sd of the autoregressive parameters
+  
+  real gamma_sigma2_epsilon;
+  real<lower=0> psi_sigma2_epsilon;
+  real gamma_sigma2_omega;
+  real<lower=0> psi_sigma2_omega;
+}
+
+transformed parameters {
+  real mu_sigma2_epsilon;
+  //real var_sigma2_epsilon;
+  real mu_sigma2_omega;
+  //real var_sigma2_omega;
+  
+  mu_sigma2_epsilon = exp(gamma_sigma2_epsilon + psi_sigma2_epsilon^2 / 2);
+  //var_sigma2_epsilon = exp();
+  mu_sigma2_omega = exp(gamma_sigma2_omega + psi_sigma2_omega^2 / 2);
+  //var_sigma2_omega = exp;  
 }
 
 model {
   // level 1 (within subject)
   for (n in 1:N) {
     // when t = 0
-    theta_0[n] ~ multi_normal(m_0[n], C_0[n]);
+    theta_0[n] ~ normal(m_0[n], c_0[n]);
   
     // when t = 1
-    theta[n][, 1] ~ multi_normal(Phi[n] * theta_0[n], Q[n]);
-    y[n][, 1] ~ multi_normal(mu[n] + theta[n][, 1], R[n]);
+    theta[n][1] ~ normal(phi[n] * theta_0[n], sigma_omega[n]);
+    y[n][1] ~ normal(mu[n] + theta[n][1], sigma_epsilon[n]);
     
     // when t = 2, ..., T 
     for (t in 2:T[n]) {
-      theta[n][, t] ~ multi_normal(Phi[n] * theta[n][, t - 1], Q[n]);
-      y[n][, t] ~ multi_normal(mu[n] + theta[n][, t], R[n]);
+      theta[n][t] ~ normal(phi[n] * theta[n][t - 1], sigma_omega[n]);
+      y[n][t] ~ normal(mu[n] + theta[n][t], sigma_epsilon[n]);
     }
   }
   
   // level 2 (between subject)
   for (n in 1:N) {
-    mu[n] ~ multi_normal(gamma_mu, Psi_mu);
-    to_vector(Phi[n]) ~ multi_normal(gamma_Phi, Psi_Phi);
-    to_vector_lower_tri(R[n]) ~ normal(gamma_R, sqrt(diag_Psi_R));
-    to_vector_lower_tri(Q[n]) ~ normal(gamma_Q, sqrt(diag_Psi_Q));
-  }
+    mu[n] ~ normal(gamma_mu, psi_mu);
+    phi[n] ~ normal(gamma_phi, psi_phi);
+    sigma_epsilon[n]^2 ~ lognormal(gamma_sigma2_epsilon, psi_sigma2_epsilon);
+    sigma_omega[n]^2 ~ lognormal(gamma_sigma2_omega, psi_sigma2_omega);
+    
+ }
   
   // the (hyper)priors of parameters are set as the Stan default values
 }
 
 generated quantities {
-  array[N] matrix[P, max_T] y_hat;
-  array[N] matrix[P, P] Tau; 
-  array[N] vector[P] rel_W;
-  vector[P] rel_B;
+  array[N] vector[max_T] y_hat;
+  array[N] real tau2; 
+  array[N] real rel_W;
+  real rel_B;
   
   for (n in 1:N) {
     // prediction 
     for (t in 1:T[n]) {
-      y_hat[n][, t] = mu[n] + theta[n][, t];
+      y_hat[n][t] = mu[n] + theta[n][t];
     }
     
     // within-subject reliability
-    Tau[n] = to_matrix((identity_matrix(P * P) - kronecker_prod(Phi[n], Phi[n])) \ to_vector(Q[n]), P, P);
-  
-    for (p in 1:P) {
-      rel_W[n, p] = Tau[n, p, p] / (Tau[n, p, p] + R[n, p, p]);
-    }
+    tau2[n] = sigma_omega[n]^2 / (1 - phi[n]^2);
+    rel_W[n] = tau2[n] / (tau2[n] + sigma_epsilon[n]^2);
+    
   }
   
   // between-subject reliability
-  for (p in 1:P) {
-    rel_B[p] = Psi_mu[p, p] / (Psi_mu[p, p] + mean(Tau[, p, p]) + gamma_R[index_of_diag_lower_tri(p, P)]);
-  }
+  rel_B = psi_mu^2 / (psi_mu^2 + mean(tau2) + mu_sigma2_epsilon);
 }

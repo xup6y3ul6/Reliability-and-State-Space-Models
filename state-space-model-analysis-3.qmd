@@ -1,0 +1,918 @@
+---
+title: "State Space Model Analysis 3"
+author: "Tzu-Yao Lin"
+date: last-modified
+bibliography: references.bib
+csl: apa.csl
+execute:
+  warning: false
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    self-contained: true
+    code-fold: false
+    code-tools: true
+---
+
+# Load Data and Packages
+
+
+```{r}
+#| label: load-packages
+
+library(tidyverse)
+theme_set(theme_bw(base_size = 14))
+library(lubridate)
+library(tsibble)
+library(cmdstanr)
+register_knitr_engine(override = FALSE)
+library(posterior)
+library(bayesplot)
+color_scheme_set("brewer-Spectral")
+# library(loo)
+
+source("custom_functions.R")
+pos_neg_color <- scales::hue_pal()(2)
+```
+
+
+```{r}
+#| label: data-preprocessing
+
+rawdata <- read_tsv("data_1beep_no1st beep_annette.tsv")
+
+data <- rawdata %>% 
+  mutate(Pos = PA, 
+         Neg = `NA`,
+         Date_Time = ymd_hms(str_glue("{year}-{month}-{day} {hour}:{min}:{sec}"), tz = "CET"),
+         Date = as_date(Date_Time),
+         Time = hms::as_hms(Date_Time),
+         WDay = wday(Date, label = TRUE),
+         Subject = factor(cumsum(PpID != lag(PpID, default = 0))), 
+         .keep = "none") %>% 
+  group_by(Subject) %>% 
+  mutate(Day = factor(cumsum(Date != lag(Date, default = origin)))) %>% 
+  group_by(Subject, Date) %>% 
+  mutate(Moment = factor(1:n())) %>% 
+  ungroup() %>% 
+  pivot_longer(cols = c(Pos, Neg), names_to = "Affect", values_to = "Score") %>% 
+  mutate(DateTime = as_datetime(ymd_hms(paste(as_date(as.double(Day)), 
+                                              as.character(Time))))) %>% 
+  as_tsibble(key = c(Subject, Affect), 
+             index = DateTime)
+
+rmarkdown::paged_table(data)
+
+```
+
+
+
+
+# Univariate State-Space Model
+
+## Model Specification
+
+According to @schuurman2019 **Measurement Error Vector Autoregressive of Order 1 Model** (MEVAR(1)), the model can be written as follows. However, here, I only use it for a single variable such as positive affect or negative affect.
+
+...
+
+## Stan Code
+
+```{cmdstan}
+#| label: mussm-stan
+#| output.var: umssm
+#| eval: false
+#| filename: "multilevel-univariate-ssm-uniform.stan"
+
+{{< include stan/multilevel-univariate-ssm-uniform.stan >}}
+```
+
+
+### try
+
+```
+sigma_epsilon^2 ~ uniform(0, 100);
+sigma_omega^2 ~ uniform(0, 100);
+
+```
+
+```
+sigma_epsilon^2 ~ uniform(0, 2000);
+sigma_omega^2 ~ uniform(0, 2000);
+
+```
+
+```
+sigma_epsilon^2 ~ uniform(0, 10000);
+sigma_omega^2 ~ uniform(0, 10000);
+
+```
+
+```
+sigma_epsilon ~ uniform(0, 100);
+sigma_omega ~ uniform(0, 100);
+
+```
+
+## Fit the Model
+
+
+```{r}
+#| label: PA-and-NA-data
+selected_sub <-  c(9, 20, 36, 57, 76, 85)
+
+data_list_PA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos) %>% 
+  drop_na(Pos) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Pos, rep(Inf, z - y))
+                             })) 
+
+data_list_NA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Neg) %>% 
+  drop_na(Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Neg, rep(Inf, z - y))
+                             })) 
+```
+
+```{r}
+#| label: mussm-PA-fit
+#| eval: false
+
+mussm_PA <- cmdstan_model("stan/multilevel-univariate-ssm-uniform.stan")
+
+mussm_PA_data <- lst(N = nrow(data_list_PA),
+                     `T` = data_list_PA$`T`,
+                     max_T = max(`T`),
+                     y = data_list_PA$data_padding)
+
+
+mussm_PA_fit <- mussm_PA$sample(data = mussm_PA_data, 
+                                chains = 6, 
+                                parallel_chains = 6, 
+                                iter_warmup = 4000, 
+                                iter_sampling = 4000, 
+                                seed = 20240329, 
+                                refresh = 2000, 
+                                show_messages = TRUE)
+```
+
+
+
+```{r}
+#| label: mussm-NA-fit
+#| eval: false
+
+mussm_NA <- cmdstan_model("stan/multilevel-univariate-ssm-uniform.stan")
+
+mussm_NA_data <- lst(N = nrow(data_list_NA),
+                     `T` = data_list_NA$`T`,
+                     max_T = max(`T`),
+                     y = data_list_NA$data_padding)
+
+
+mussm_NA_fit <- mussm_NA$sample(data = mussm_NA_data, 
+                                chains = 6, 
+                                parallel_chains = 6, 
+                                iter_warmup = 4000, 
+                                iter_sampling = 4000, 
+                                seed = 20240329, 
+                                refresh = 2000, 
+                                show_messages = TRUE)
+```
+
+
+## Model Diagnostics and Convergence
+
+```{r}
+mussm_PA_fit_draws <- mussm_PA_fit$draws(format = "df")
+mcmc_trace(mussm_PA_fit_draws, pars = vars(starts_with("mu")))
+mcmc_trace(mussm_PA_fit_draws, pars = vars(starts_with("phi")))
+mcmc_trace(mussm_PA_fit_draws, pars = vars(starts_with("theta_0")))
+mcmc_trace(mussm_PA_fit_draws, pars = vars(starts_with("sigma_epsilon")))
+mcmc_trace(mussm_PA_fit_draws, pars = vars(starts_with("sigma_omega")))
+mcmc_trace(mussm_PA_fit_draws, pars = vars(starts_with("rel")))
+```
+
+```{r}
+mussm_NA_fit_draws <- mussm_NA_fit$draws(format = "df")
+mcmc_trace(mussm_NA_fit_draws, pars = vars(starts_with("mu")))
+mcmc_trace(mussm_NA_fit_draws, pars = vars(starts_with("phi")))
+mcmc_trace(mussm_NA_fit_draws, pars = vars(starts_with("theta_0")))
+mcmc_trace(mussm_NA_fit_draws, pars = vars(starts_with("sigma_epsilon")))
+mcmc_trace(mussm_NA_fit_draws, pars = vars(starts_with("sigma_omega")))
+mcmc_trace(mussm_NA_fit_draws, pars = vars(starts_with("rel")))
+```
+
+
+
+```{r}
+#| label: mussm-PA-diagnostics
+
+mussm_PA_fit_summary <- mussm_PA_fit$summary()
+View(mussm_PA_fit_summary)
+```
+
+
+## Results
+### Fitted values
+
+```{r}
+y_hat_PA_summary <- mussm_PA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[2])))
+  
+
+y_hat_NA_summary <- mussm_NA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[2])))
+
+
+
+```
+
+
+```{r}
+data_predict <- data %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  group_by(Subject) %>% 
+  mutate(Time_Index = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_longer(c("Pos", "Neg"), names_to = "Affect", values_to = "Score") %>% 
+  left_join(bind_rows(y_hat_PA_summary, y_hat_NA_summary))
+
+data_predict %>% 
+  filter(Subject %in% selected_sub) %>% 
+  ggplot(aes(x = DateTime, y = Score)) + 
+  geom_line(aes(color = Affect)) + 
+  geom_point(aes(color = Affect)) +
+  scale_color_manual(values = pos_neg_color) +
+  geom_line(aes(y = mean, group = Affect), linetype = "dashed") +
+  geom_ribbon(aes(ymin = q5, ymax = q95, group = Affect), alpha = 0.25) +
+  geom_hline(yintercept = c(0, 100), color = "forestgreen") +
+  scale_y_continuous(limits = c(-20, 120)) +
+  scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                   labels = paste("Day", 1:7),
+                   limits = as_datetime(c(1, 8) * 86400)) +
+  facet_grid(Subject ~ .) 
+```
+
+
+### Reliability
+
+
+```{r}
+#| label: realiability
+
+rel_W_PA_draws <- mussm_PA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos")
+rel_W_NA_draws <- mussm_NA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg")
+rel_W_draws <- bind_rows(rel_W_PA_draws, rel_W_NA_draws)
+
+ggplot(rel_W_draws, aes(x = 1, y = value, fill = Affect)) +
+  geom_split_violin() +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = pos_neg_color) +
+  facet_wrap(~ Subject, ncol = 10)
+```
+
+
+
+```{r}
+rel_B_PA_draws <- mussm_PA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(rel_B_PA = rel_B, .keep = "unused")
+rel_B_NA_draws <- mussm_NA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(rel_B_NA = rel_B, .keep = "unused")
+rel_B_draws <- left_join(rel_B_PA_draws, rel_B_NA_draws) %>% 
+  mutate(rel_B_diff = rel_B_PA - rel_B_NA)
+
+color_scheme_set("brightblue")
+mcmc_areas(rel_B_draws,
+           prob = 0.8,
+           prob_outer = 0.99) +
+  coord_cartesian(xlim = c(-1.5, 1.5))
+```
+
+
+## All subjects
+```{r}
+selected_sub <-  data$Subject %>% unique()
+
+data_list_PA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos) %>% 
+  drop_na(Pos) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Pos, rep(Inf, z - y))
+                             })) 
+
+data_list_NA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Neg) %>% 
+  drop_na(Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Neg, rep(Inf, z - y))
+                             })) 
+```
+
+For PA
+```{r}
+mussm_PA <- cmdstan_model("stan/multilevel-univariate-ssm-uniform.stan")
+
+mussm_PA_data <- lst(N = nrow(data_list_PA),
+                     `T` = data_list_PA$`T`,
+                     max_T = max(`T`),
+                     y = data_list_PA$data_padding)
+
+
+mussm_PA_fit <- mussm_PA$sample(data = mussm_PA_data, 
+                                chains = 6, 
+                                parallel_chains = 6, 
+                                iter_warmup = 4000, 
+                                iter_sampling = 4000, 
+                                seed = 20240329, 
+                                refresh = 2000, 
+                                show_messages = TRUE)
+#mussm_PA_fit$save_object(file = "stan/multilevel-univariate-ssm-uniform-PA-fit.RDS")
+
+```
+
+All 6 chains finished successfully.
+Mean chain execution time: 7184.5 seconds.
+Total execution time: 7651.6 seconds.
+
+Warning: 4004 of 24000 (17.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 19996 of 24000 (83.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 6 of 6 chains had an E-BFMI less than 0.2.
+See https://mc-stan.org/misc/warnings for details.
+
+For NA
+```{r}
+mussm_NA <- cmdstan_model("stan/multilevel-univariate-ssm-uniform.stan")
+
+mussm_NA_data <- lst(N = nrow(data_list_NA),
+                     `T` = data_list_NA$`T`,
+                     max_T = max(`T`),
+                     y = data_list_NA$data_padding)
+
+
+mussm_NA_fit <- mussm_NA$sample(data = mussm_NA_data, 
+                                chains = 6, 
+                                parallel_chains = 6, 
+                                iter_warmup = 4000, 
+                                iter_sampling = 4000, 
+                                seed = 20240329, 
+                                refresh = 2000, 
+                                show_messages = TRUE)
+
+# mussm_NA_fit$save_object(file = "stan/multilevel-univariate-ssm-uniform-NA-fit.RDS")
+```
+
+
+### Results
+```{r}
+# mussm_PA_fit$cmdstan_summary()
+# mussm_NA_fit$cmdstan_summary()
+# skimr::skim(mussm_PA_fit$summary("rhat"))
+
+color_scheme_set("brewer-Spectral")
+mussm_PA_fit$draws(variables = "mu", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_PA_fit$draws(variables = "phi", format = "df") %>% 
+  select(37:48, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_PA_fit$draws(variables = "sigma_epsilon", format = "df") %>% 
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_PA_fit$draws(variables = "sigma_omega", format = "df") %>% 
+  select(73:84, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_PA_fit$draws(variables = "rel_W", format = "df") %>% 
+  select(61:72, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+
+```
+
+
+```{r}
+mussm_NA_fit$draws(variables = "mu", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "phi", format = "df") %>% 
+  select(37:48, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "sigma_epsilon", format = "df") %>% 
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "sigma_omega", format = "df") %>% 
+  select(73:84, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "rel_W", format = "df") %>% 
+  select(61:72, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+```
+
+
+```{r}
+y_hat_PA_summary <- mussm_PA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[2])))
+
+y_hat_NA_summary <- mussm_NA_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg",
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[2])))
+
+data_predict <- data %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  group_by(Subject) %>% 
+  mutate(Time_Index = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_longer(c("Pos", "Neg"), names_to = "Affect", values_to = "Score") %>% 
+  left_join(bind_rows(y_hat_PA_summary, y_hat_NA_summary))
+
+for (i in 1:10) {
+  g <- data_predict %>% 
+    filter(Subject %in% (10 * (i - 1) + 1):(10 * i)) %>% 
+    ggplot(aes(x = DateTime, y = Score)) + 
+    geom_line(aes(color = Affect)) + 
+    geom_point(aes(color = Affect)) +
+    scale_color_manual(values = pos_neg_color) +
+    geom_line(aes(y = mean, group = Affect), linetype = "dashed") +
+    geom_ribbon(aes(ymin = q5, ymax = q95, group = Affect), alpha = 0.25) +
+    geom_hline(yintercept = c(0, 100), color = "forestgreen") +
+    scale_y_continuous(limits = c(-20, 120)) +
+    scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                     labels = paste("Day", 1:7),
+                     limits = as_datetime(c(1, 8) * 86400)) +
+    facet_grid(Subject ~ .) 
+  
+  ggsave(filename = str_glue("plots/mussm_uniform_100_for_sigma/predict_{from}-{to}.png",
+                             from = 10 * (i - 1) + 1, to = 10 * i),
+         plot = g, width = 7, height = 14)
+}
+
+```
+
+```{r}
+rel_W_PA_draws <- mussm_PA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Pos")
+rel_W_NA_draws <- mussm_NA_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>% 
+                     factor(levels = levels(data$Subject)),
+         Affect = "Neg")
+rel_W_draws <- bind_rows(rel_W_PA_draws, rel_W_NA_draws)
+
+g_rel_W <- ggplot(rel_W_draws, aes(x = 1, y = value, fill = Affect)) +
+  geom_split_violin() +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = pos_neg_color) +
+  facet_wrap(~ Subject, ncol = 10)
+ggsave("plots/mussm_uniform_100_for_sigma/rel-W.png", g_rel_W, width = 14, height = 14)
+```
+
+```{r}
+rel_B_PA_draws <- mussm_PA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(rel_B_PA = rel_B, .keep = "unused")
+rel_B_NA_draws <- mussm_NA_fit$draws(variables = "rel_B", format = "df") %>% 
+  mutate(rel_B_NA = rel_B, .keep = "unused")
+rel_B_draws <- left_join(rel_B_PA_draws, rel_B_NA_draws) %>% 
+  mutate(rel_B_diff = rel_B_PA - rel_B_NA)
+
+g_rel_B <- mcmc_areas(rel_B_draws,
+           prob = 0.8,
+           prob_outer = 0.99) +
+  coord_cartesian(xlim = c(-1, 1))
+
+ggsave("plots/mussm_uniform_100_for_sigma/rel-B.png", g_rel_B)
+```
+
+
+## Fully hierarchical model
+
+### Fitting
+```{r}
+mussm2_PA <- cmdstan_model("stan/multilevel-univariate-ssm-lognormal.stan")
+
+selected_sub <-  c(9, 20, 36, 57, 76, 85)
+
+data_list_PA <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos) %>% 
+  drop_na(Pos) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               c(x$Pos, rep(Inf, z - y))
+                             })) 
+
+mussm2_PA_data <- lst(N = nrow(data_list_PA),
+                      `T` = data_list_PA$`T`,
+                      max_T = max(`T`),
+                      y = data_list_PA$data_padding)
+
+
+mussm2_PA_fit <- mussm2_PA$sample(data = mussm2_PA_data, 
+                                  chains = 6, 
+                                  parallel_chains = 6, 
+                                  iter_warmup = 4000, 
+                                  iter_sampling = 8000, 
+                                  seed = 20240329, 
+                                  refresh = 2000, 
+                                  show_messages = TRUE)
+```
+
+
+```{r}
+mussm2_NA <- cmdstan_model("stan/multilevel-univariate-ssm-lognormal.stan")
+
+mussm2_NA_data <- lst(N = nrow(data_list_NA),
+                     `T` = data_list_NA$`T`,
+                     max_T = max(`T`),
+                     y = data_list_NA$data_padding)
+
+
+mussm2_NA_fit <- mussm2_NA$sample(data = mussm2_NA_data, 
+                                chains = 6, 
+                                parallel_chains = 6, 
+                                iter_warmup = 4000, 
+                                iter_sampling = 4000, 
+                                seed = 20240329, 
+                                refresh = 2000, 
+                                show_messages = TRUE)
+```
+
+### Results
+
+```{r}
+mussm2_PA_fit_draws <- mussm2_PA_fit$draws(format = "df")
+
+
+mussm2_PA_fit$draws(variables = "mu", format = "df") %>% 
+  mcmc_trace()
+mussm2_PA_fit$draws(variables = "phi", format = "df") %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "sigma_epsilon", format = "df") %>% 
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "sigma_omega", format = "df") %>% 
+  select(73:84, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mussm_NA_fit$draws(variables = "rel_W", format = "df") %>% 
+  select(61:72, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+
+
+```
+
+
+
+
+
+# Multivariate State-Space Model
+
+## Try 1
+
+```{r}
+selected_sub <- c(9, 20, 36, 57, 76, 85)
+data_list <- tibble(data) %>% 
+  filter(Subject %in% selected_sub) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               bind_rows(x, 
+                                         tibble(Pos = rep(Inf, z - y),
+                                                Neg = rep(Inf, z - y))) %>% 
+                                 t()
+                             }))
+
+
+mssm_data <- lst(N = nrow(data_list),
+                 `T` = map(data_list$data, nrow),
+                 max_T = max(data_list$`T`),
+                 y = data_list$data_padding)
+```
+
+
+```{r}
+mssm <- cmdstan_model("stan/multilevel-multivariate-ssm-uniform.stan")
+
+mssm_fit <- mssm$sample(data = mssm_data, 
+                        chains = 6,
+                        parallel_chains = 6,
+                        iter_warmup = 4000,
+                        iter_sampling = 8000,
+                        seed = 20240327,
+                        refresh = 2000, 
+                        show_messages = TRUE)
+# mssm_fit$save_object(file = "stan/multilevel-multivariate-ssm-lkj-fit.RDS")
+```
+
+
+=== LKJ prior ===
+All 6 chains finished successfully.
+Mean chain execution time: 6296.4 seconds.
+Total execution time: 6609.9 seconds.
+
+Warning: 4352 of 24000 (18.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 19648 of 24000 (82.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 5 of 6 chains had an E-BFMI less than 0.2.
+See https://mc-stan.org/misc/warnings for details.
+
+
+=== Uniform 4000 warn-up 8000 iter ===
+
+All 6 chains finished successfully.
+Mean chain execution time: 16067.1 seconds.
+Total execution time: 16577.4 seconds.
+
+Warning: 7978 of 48000 (17.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 40022 of 48000 (83.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 5 of 6 chains had an E-BFMI less than 0.2.
+See https://mc-stan.org/misc/warnings for details.
+
+
+```{r}
+color_scheme_set("brewer-Spectral")
+mssm_fit$draws(variables = "mu", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mssm_fit$draws(variables = "Phi", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mssm_fit$draws(variables = c("gamma_mu", "gamma_Phi"), format = "df") %>% 
+  mcmc_trace()
+mssm_fit$draws(variables = c("tau_R"), format = "df") %>%
+  mcmc_trace()
+mssm_fit$draws(variables = c("tau_Q"), format = "df") %>%
+  mcmc_trace()
+mssm_fit$draws(variables = c("Sigma_R"), format = "df") %>%
+  mcmc_trace()
+```
+
+
+## Try 2
+
+Schuurman & Hamaker (2019) settings
+
+```{r}
+
+
+mssm2 <- cmdstan_model("stan/multilevel-multivariate-ssm-s2019.stan")
+
+mssm2_fit <- mssm2$sample(data = mssm_data, 
+                          chains = 6,
+                          parallel_chains = 6,
+                          iter_warmup = 4000,
+                          iter_sampling = 8000,
+                          seed = 20240327,
+                          refresh = 2000, 
+                          show_messages = TRUE,
+                          save_warmup = TRUE)
+```
+
+All 6 chains finished successfully.
+Mean chain execution time: 13077.3 seconds.
+Total execution time: 13935.0 seconds.
+
+Warning: 9077 of 48000 (19.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 38923 of 48000 (81.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 2 of 6 chains had an E-BFMI less than 0.2.
+See https://mc-stan.org/misc/warnings for details.
+
+=== another test ===
+Chain 2 Iteration: 4000 / 4000 [100%]  (Sampling) 
+Chain 2 finished in 2714.5 seconds.
+
+All 6 chains finished successfully.
+Mean chain execution time: 2531.8 seconds.
+Total execution time: 2714.6 seconds.
+
+Warning: 2706 of 12000 (23.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 9294 of 12000 (77.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+===3rd test===
+
+All 6 chains finished successfully.
+Mean chain execution time: 9971.0 seconds.
+Total execution time: 10257.1 seconds.
+
+Registered S3 method overwritten by 'data.table':
+  method           from
+  print.data.table     
+Warning: 5746 of 48000 (12.0%) transitions ended with a divergence.
+See https://mc-stan.org/misc/warnings for details.
+
+Warning: 42254 of 48000 (88.0%) transitions hit the maximum treedepth limit of 10.
+See https://mc-stan.org/misc/warnings for details.
+
+
+```{r}
+mssm2_fit$draws(variables = "mu", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mssm2_fit$draws(variables = "Phi", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mssm2_fit$draws(variables = "Phi", format = "df") %>% 
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mssm2_fit$draws(variables = "sigma_omega", format = "df") %>% 
+  mcmc_trace()
+mssm2_fit$draws(variables = "sigma_epsilon", format = "df") %>% 
+  mcmc_trace()
+mssm2_fit$draws(variables = "ervar", format = "df") %>%
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+mssm2_fit$draws(variables = "ervar", format = "df") %>%
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+```
+
+
+```{r}
+mssm2_sum <- mssm2_fit$summary()
+View(mssm2_sum)
+```
+
+
+
+
+
+### Resampling
+
+```{r}
+Fit2 <- mssm2$sample(data = mssm_data, 
+                     chains = 6,
+                     parallel_chains = 6,
+                     iter_warmup = 0,
+                     iter_sampling = 1000,
+                     adapt_engaged = FALSE,
+                     inv_metric = mssm2_fit$inv_metric(matrix = FALSE),
+                     step_size = mssm2_fit$metadata()$step_size_adaptation,
+                     init = createStanInitsPreviousRun(mssm2_fit),
+                     seed = 20240328,
+                     refresh = 1000, 
+                     show_messages = TRUE,
+                     save_warmup = TRUE)
+```
+
+```{r}
+Fit2$draws(variables = "mu", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit2$draws(variables = "Phi", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit2$draws(variables = "Phi", format = "df") %>% 
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit2$draws(variables = "sigma_omega", format = "df") %>% 
+  mcmc_trace()
+Fit2$draws(variables = "sigma_epsilon", format = "df") %>% 
+  mcmc_trace()
+Fit2$draws(variables = "ervar", format = "df") %>%
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit2$draws(variables = "ervar", format = "df") %>%
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+```
+
+
+```{r}
+Fit3 <- mssm2$sample(data = mssm_data, 
+                     chains = 6,
+                     parallel_chains = 6,
+                     iter_warmup = 0,
+                     iter_sampling = 1000,
+                     adapt_engaged = FALSE,
+                     inv_metric = Fit2$inv_metric(matrix = FALSE),
+                     step_size = Fit2$metadata()$step_size_adaptation,
+                     init = createStanInitsPreviousRun(Fit2),
+                     seed = 20240329,
+                     refresh = 2000, 
+                     show_messages = TRUE,
+                     save_warmup = TRUE)
+```
+```{r}
+Fit2$draws(variables = "mu", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit3$draws(variables = "Phi", format = "df") %>% 
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit3$draws(variables = "Phi", format = "df") %>% 
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit3$draws(variables = "sigma_omega", format = "df") %>% 
+  mcmc_trace()
+Fit3$draws(variables = "sigma_epsilon", format = "df") %>% 
+  mcmc_trace()
+Fit3$draws(variables = "ervar", format = "df") %>%
+  select(1:12, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+Fit3$draws(variables = "ervar", format = "df") %>%
+  select(13:24, .chain, .iteration, .draw) %>% 
+  mcmc_trace()
+```
+

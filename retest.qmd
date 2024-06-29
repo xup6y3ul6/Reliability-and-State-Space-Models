@@ -1,0 +1,852 @@
+---
+title: "State-Space Model Analysis"
+author: "Tzu-Yao Lin"
+date: last-modified
+bibliography: references.bib
+csl: apa.csl
+execute:
+  warning: false
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    self-contained: true
+    code-fold: false
+    code-tools: true
+---
+
+# Dataset
+
+This dataset comes from Koval and his colleagues' [-@koval2013] study, in which they use a novel paradigm and analytic approach to study the dynamic process of depression. In past studies, depression is associated with higher average levels of negative affect (NA) and lower average levels of positive affect (PA). However, few studies untangle the relationship between the pattern of affective fluctuations and the dynamics of depression. Therefore, in their study, they collected 99 (the final number) subjects' depression symptoms by the Center for Epidemiologic Studies Depression Scale and (CES-D) and daily experiences of affect ratings 10 times/day for 7 days using the experience sampling method (ESM).
+
+Affect ratings were made on:
+
+-   PA = mean(happy, relaxed), and
+
+-   NA = mean(sad, depressed, anxious, angry).
+
+The scale of each affect rating is from 1 (not at all) to 100 (very much).
+
+```{r}
+#| label: load-packages-and-rawdata
+
+library(tidyverse)
+theme_set(theme_bw(base_size = 14))
+library(lubridate)
+
+rawdata <- read_tsv("data_1beep_no1st beep_annette.tsv")
+rmarkdown::paged_table(rawdata)
+```
+
+```{r}
+#| label: sorting-data
+
+data <- rawdata %>% 
+  mutate(Pos = PA, 
+         Neg = `NA`,
+         Date_Time = ymd_hms(str_glue("{year}-{month}-{day} {hour}:{min}:{sec}"), tz = "CET"),
+         Date = as_date(Date_Time),
+         Time = hms::as_hms(Date_Time),
+         WDay = wday(Date, label = TRUE),
+         Subject = factor(cumsum(PpID != lag(PpID, default = 0))), 
+         .keep = "none") %>% 
+  group_by(Subject) %>% 
+  mutate(Day = factor(cumsum(Date != lag(Date, default = origin)))) %>% 
+  group_by(Subject, Date) %>% 
+  mutate(Moment = factor(1:n())) %>% 
+  ungroup() %>% 
+  pivot_longer(cols = c(Pos, Neg), names_to = "Affect", values_to = "Score") 
+
+rmarkdown::paged_table(data)
+```
+
+Nevertheless, I found some discrepancies between the data I got and the descriptions in the literature.
+
+1.  The number of subjects in my data is 97;
+2.  The sampling time points are not always 7 (days) and 10 (times). There are many missing values.
+
+All analyses were conducted using the maximum available sample size: for analyses involving ESM data, n=95; for all other analyses, n=99.
+
+```{r}
+#| label: num-of-missing-data-1
+
+t1 <- data %>% 
+  group_by(Subject, Affect) %>% 
+  summarise(num_day = length(unique(Day)),
+            num_obser = n(),
+            num_missing = sum(is.na(Score)),
+            num_obser_valid = num_obser - num_missing) %>% 
+  ungroup()
+rmarkdown::paged_table(t1)
+
+summary(t1)
+table(t1$num_day)
+```
+
+```{r}
+#| label: num-of-missing-data-2
+
+t2 <- data %>% 
+  group_by(Subject, Affect, Day) %>% 
+  summarise(num_moment = n(), 
+            num_missing = sum(is.na(Score)), 
+            num_valid = num_moment - num_missing) %>% 
+  ungroup()
+rmarkdown::paged_table(t2)
+summary(t2)
+table(t2$num_moment)
+table(t2$num_valid)
+```
+
+# Data Illustration
+
+```{r}
+#| label: load-packages
+
+library(tsibble)
+```
+
+```{r}
+#| label: fig-trend-illus
+#| fig-cap: "Illustration of the Positive and Negative Affect scores for different time points for a subgroup of subjects"
+
+subdata <- data %>% 
+  filter(Subject %in% c(9, 20, 36, 57, 76, 85)) %>% 
+  mutate(DateTime = as_datetime(ymd_hms(paste(as_date(as.double(Day)), 
+                                              as.character(Time))))) %>% 
+  as_tsibble(key = c(Subject, Affect), 
+             index = DateTime) 
+
+pos_neg_color <- rev(scales::hue_pal()(2))
+
+ggplot(subdata, aes(x = DateTime, y = Score, color = Affect)) + 
+  geom_line() + geom_point() +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                   labels = paste("Day", 1:7),
+                   limits = as_datetime(c(1, 8) * 86400)) +
+  scale_color_manual(values = pos_neg_color) +
+  facet_grid(rows = "Subject") 
+
+```
+
+```{r}
+#| label: fig-all-subject-time-trends
+#| eval: false
+#| echo: false
+
+.data <- data %>% 
+  mutate(DateTime = as_datetime(ymd_hms(paste(as_date(as.double(Day)), 
+                                              as.character(Time))))) %>% 
+  as_tsibble(key = c(Subject, Affect), 
+             index = DateTime) 
+
+pos_neg_color <- rev(scales::hue_pal()(2))
+
+
+for (i in unique(data$Subject)) {
+  g <- .data %>% 
+    filter(Subject == i) %>% 
+    ggplot(aes(x = DateTime, y = Score, color = Affect)) + 
+    geom_line() + geom_point() +
+    scale_y_continuous(limits = c(0, 100)) +
+    scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                     labels = paste("Day", 1:7),
+                     limits = as_datetime(c(1, 8) * 86400)) +
+    scale_color_manual(values = pos_neg_color) +
+    facet_grid(rows = "Subject")
+  
+  ggsave(paste0("plots/", i, ".png"), g)
+}
+
+```
+
+Some observation:
+
+-   The positive affect scores generally are larger than the negative affect scores. Both scores are negatively correlated. But there are some exception cases.
+
+-   The sampling time points are quite different between subjects.
+
+-   The data was collected majorly in the latter half of the day.
+
+-   The sampling intervals are not fixed within days and subjects.
+
+-   There are a lot of missing data.
+
+# State-Space Model
+
+## Single Level Model
+
+Here, I only fitted one subject specifically.
+
+### Model Specification
+
+Here, I follow @schuurman2019 Measurement Error Vector Autoregressive with Order 1 Model (MEVAR(1)) **without a multilevel setting.** It means I will fit each subject separately.
+
+-   Measurement equation
+
+$$\begin{pmatrix}y_{1it} \\ y_{2it}\end{pmatrix} = \begin{pmatrix}\mu_{1i} \\ \mu_{2i}\end{pmatrix} + \begin{pmatrix}\theta_{1it} \\ \theta_{2it}\end{pmatrix} + \begin{pmatrix}\epsilon_{1it} \\ \epsilon_{2it}\end{pmatrix}
+$$
+
+$$
+\begin{pmatrix}\epsilon_{1it} \\ \epsilon_{2it}\end{pmatrix} \sim \mathcal{N} \left(\begin{pmatrix}0 \\ 0\end{pmatrix}, \mathbf{R}_i = \begin{pmatrix} \sigma^2_{\epsilon 11i} & \sigma_{\epsilon 12i} \\ \sigma_{\epsilon 12i} & \sigma^2_{\epsilon 22i}\end{pmatrix}\right)
+$$
+
+-   State equation (state space model representation)
+
+$$
+\begin{pmatrix}\theta_{1it} \\ \theta_{2it}\end{pmatrix} = \begin{pmatrix} \phi_{11i} & \phi_{12i} \\ \phi_{12i} & \phi_{22i} \end{pmatrix} \begin{pmatrix}\theta_{1it-1} \\ \theta_{2it-1}\end{pmatrix} + \begin{pmatrix}\omega_{1it} \\ \omega_{2it}\end{pmatrix}
+$$
+
+$$
+\begin{pmatrix}\omega_{1it} \\ \omega_{2it}\end{pmatrix} \sim \mathcal{N} \left(\begin{pmatrix}0 \\ 0\end{pmatrix}, \mathbf{Q}_i = \begin{pmatrix} \sigma^2_{\omega 11i} & \sigma_{\omega 12i} \\ \sigma_{\omega 12i} & \sigma^2_{\omega 22i}\end{pmatrix}\right)
+$$
+
+where
+
+-   subject index $i = 1, \dots, N$ and occasion index: $t = 1, \dots T$
+
+-   observation vector: $\mathbf{y}_{it} = \begin{pmatrix} y_{1it} \\ y_{2it} \end{pmatrix}$
+
+-   latent state (within-person fluctuation): $\boldsymbol{\theta}_{it} = \begin{pmatrix} \theta_{1it} \\ \theta_{2it}\end{pmatrix}$
+
+    -   initial latent state: $\boldsymbol{\theta}_{i0} = \begin{pmatrix} \theta_{1i0} \\ \theta_{2i0} \end{pmatrix} \sim \mathcal{N} \left( \mathbf{m}_0 = \begin{pmatrix} 0 \\ 0 \end{pmatrix}, \mathbf{C}_0 = \begin{pmatrix} 10^3 & 0 \\ 0 & 10^3 \end{pmatrix} \right)$
+
+-   person-specific means (trait): $\boldsymbol{\mu}_i = \begin{pmatrix}\mu_{i1} \\ \mu_{2i}\end{pmatrix}$
+
+-   measurement errors: $\boldsymbol{\epsilon}_i = \begin{pmatrix} \epsilon_{1i} \\ \epsilon_{2i} \end{pmatrix}$
+
+-   autoregressive coefficients: $\boldsymbol{\Phi}_i = \begin{pmatrix} \phi_{11i} & \phi_{12i} \\ \phi_{12i} & \phi_{22i} \end{pmatrix}$
+
+-   innovation: $\boldsymbol{\omega}_i = \begin{pmatrix} \omega_{1i} \\ \omega_{2i} \end{pmatrix}$
+
+### Properties
+
+-   A linear mixed-effect model expression:
+
+We can rewrite the SSM as the LMM. If we combine the measurement equation and the state equation and extend the current time $t$ to the origin, we have $$
+\mathbf{y}_{it} = \boldsymbol{\mu}_{i} + \boldsymbol{\Phi}_i^t\boldsymbol{\theta_{i0}} + \sum_{k=0}^{t-1} \boldsymbol{\Phi}_i^k \mathbf{w}_{i,t-k} + \boldsymbol{\epsilon}_{it}
+$$
+
+Let $\mathbf{W}_{it} = \boldsymbol{\Phi}_i^t\boldsymbol{\theta_{i0}} + \sum_{k=0}^{t-1} \boldsymbol{\Phi}_i^k \mathbf{w}_{i,t-k}$, which has a mean $0$ and a variance $\mathbf{T}_i$ (see below). So,
+
+$$
+\mathbf{y}_{it} = \boldsymbol{\mu}_{i} + \mathbf{W}_{it} + \boldsymbol{\epsilon}_{it}
+$$
+
+where $\boldsymbol{\mu}_i$ is a fixed effect, $\mathbf{W}_{it} \sim \mathcal{N}(\mathbf{0}, \mathbf{T}_i)$ is a ~~Gaussian stochastic process~~???, and $\epsilon_{it} \sim \mathcal{N}(0, \mathbf{R})$ is a measurement error. However, there is no random effect in this model under this case.
+
+-   The expectation of $\mathbf{y}_{it}$
+
+$$\begin{align*}
+E[\mathbf{y}_{it}] &= E[\boldsymbol{\mu}_{i}] + E[\boldsymbol{\Phi}_i^t\boldsymbol{\theta_{i0}}] + E[\sum_{k=0}^{t-1} \boldsymbol{\Phi}_i^k \mathbf{w}_{i,t-k}] + E[\boldsymbol{\epsilon}_{it}] \\
+&= \boldsymbol{\mu}_{i} + \boldsymbol{\Phi}_i^t \mathbf{m}_0 + 0 + 0 = \boldsymbol{\mu}_{i}
+\end{align*}$$
+
+-   The variance of $\mathbf{y}_{it}$
+
+$$\begin{equation}
+Var(\mathbf{y}_{it}) = Var(\boldsymbol{\mu}_{i}) + Var(\boldsymbol{\theta}_{it}) + Var(\boldsymbol{\epsilon}_{it}) = 0 + Var(\boldsymbol{\theta}_{it}) + \mathbf{R}_i
+\end{equation}$$
+
+$$\begin{align}
+Var(\boldsymbol{\theta}_{it}) = Var(\boldsymbol{\Phi}_i\mathbf{\theta}_{it-1} + \boldsymbol{w}_{it}) = \boldsymbol{\Phi}_i Var(\mathbf{\theta}_{it-1}) \boldsymbol{\Phi}_i^\top + \mathbf{Q}_i
+\end{align}$$
+
+Under the stationary assumption, we let $\mathbf{T}_i = Var(\boldsymbol{\theta}_{it})$ for all $t$.
+
+$$\begin{align*}
+&\mathbf{T}_i = \boldsymbol{\Phi}_i \mathbf{T}_i \boldsymbol{\Phi}_i^\top + \mathbf{Q}_i \\
+\Rightarrow &vec(\mathbf{T}_i) = (\boldsymbol{\Phi}_i \otimes \boldsymbol{\Phi}_i) vec(\mathbf{T}_i) + vec(\mathbf{Q}_i) \\
+\Rightarrow &vec(\mathbf{T}_i) = (\mathbf{I} - \boldsymbol{\Phi}_i \otimes \boldsymbol{\Phi}_i)^{-1} vec(\mathbf{Q}_i) \\
+\Rightarrow &\mathbf{T}_i = mat((\mathbf{I} - \boldsymbol{\Phi}_i \otimes \boldsymbol{\Phi}_i)^{-1} vec(\mathbf{Q}_i))
+\end{align*}$$
+
+Thus,
+
+$$
+Var(\mathbf{y}_{it}) = \mathbf{T}_i + \mathbf{R}_i
+$$
+
+-   The covariance of $\mathbf{y}_{it}$ and $\mathbf{y}_{it'}$ ($t \neq t'$):
+
+$$\begin{align}
+Cov(\mathbf{y}_{it}, \mathbf{y}_{it'}) &= Cov(\mu_i + \theta_{it} + \epsilon_{it}, \mu_i + \theta_{it'} + \epsilon_{it'}) \\
+&= ?????
+\end{align}$$
+
+### Reliability (subject specific)
+
+-   Based on @schuurman2019
+
+$$
+R_k = \frac{(\mathbf{T}_i)_{kk}}{(\mathbf{T}_i)_{kk} + (\mathbf{R}_i)_{kk}}
+$$
+
+where $k = 1, 2$ for positive and negative affects, respectively.
+
+-   Based on @vangeneugden2005 and @molenberghs2007,
+
+![](images/Picture1.png){fig-align="center" width="500"}
+
+There is a problem of representing $Y$. In @molenberghs2007, $\mathbf{Y}_i = (y_{i1}, \dots, y_{iT})^\top$ is a vector collecting observations for all time points. However, in our MEVAR(1) model, $\mathbf{y}_{it} = (y_{1it}, y_{2it})^\top$ is a vector collecting the positive and negative affects at $t$. Maybe, I should represent
+
+$$
+\mathbf{Y}_i = \begin{pmatrix} y_{1i1} & y_{2i1} \\ \vdots & \vdots \\ y_{1it} & y_{2it} \\ \vdots & \vdots \\ y_{1iT} & y_{2iT}  \end{pmatrix} = \mu + ...
+$$
+
+### Bayesian Estimation by Stan
+
+#### Case 1: Fit only for the positive affect
+
+```{r}
+#| label: load-packages-and-setting-for-Bayeisan
+
+library(cmdstanr)
+register_knitr_engine(override = TRUE)
+library(posterior)
+library(bayesplot)
+color_scheme_set("red")
+bayesplot_theme_set(theme_bw(base_size = 14))
+# library(loo)
+```
+
+The corresponding Stan codes for the one affect of one subject:
+
+```{cmdstan filename="ssm0.stan"}
+#| label: ssm0-stan
+#| output.var: ssm0
+#| eval: false
+
+{{< include stan/ssm0.stan >}}
+```
+
+MCMC results:
+
+```{r}
+#| label: ssm0-fit
+#| eval: false
+
+s20_pos_data <- data %>% 
+  filter(Subject == 20, Affect == "Pos") %>% 
+  drop_na(Score) %>% 
+  pull(Score)
+
+ssm0_data <- list(`T` = length(s20_pos_data),
+                  y = s20_pos_data, 
+                  m_0 = 0, 
+                  C_0 = matrix(10^3))
+
+ssm0 <- cmdstan_model("stan/ssm0.stan")
+
+ssm0_fit <- ssm0$sample(data = ssm0_data, 
+                        seed = 20240207,
+                        chains = 4,
+                        parallel_chains = 4,
+                        refresh = 500)
+
+ssm0_fit$save_object(file = "stan/ssm0-fit.RDS")
+```
+
+```{r}
+#| label: ssm0-result
+
+ssm0_fit <- readRDS("stan/ssm0-fit.RDS")
+ssm0_fit$cmdstan_summary() 
+```
+
+We can find there are sufficient ESS for each parameters and the $\hat{R}$'s are close to the 1.00, showing the MCMC chains could be convergent.
+
+```{r}
+#| label: fig-ssm0
+#| fig-cap: "Postive affect observervation vs. fitted value (the black dotted line) and 95% CI (gray areas)."
+
+y_hat_pos_summary <- ssm0_fit$summary("y_hat", mean, median, quantile2)
+
+
+s20_pos_predict <- subdata %>% 
+  filter(Subject == 20, Affect == "Pos") %>% 
+  drop_na(Score) %>% 
+  bind_cols(y_hat_pos_summary)
+
+ggplot(s20_pos_predict, aes(x = DateTime, y = Score)) + 
+  geom_line(color = pos_neg_color[2]) + 
+  geom_point(color = pos_neg_color[2]) +
+  geom_line(aes(y = mean), linetype = "dashed") +
+  geom_ribbon(aes(ymin = q5, ymax = q95), alpha = 0.25) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                   labels = paste("Day", 1:7),
+                   limits = as_datetime(c(1, 8) * 86400))
+
+```
+
+The fitted line (dotted black line) with 95% CI (gray areas) indeed capture the trend of the observed data.
+
+#### Case 2: Fit PA and NA simultaneously
+
+Here, we fit the PA and NA at the same time
+
+```{cmdstan filename="ssm1.stan"}
+#| label: ssm1-stan
+#| output.var: ssm1
+#| eval: false
+
+{{< include stan/ssm1.stan >}}
+
+```
+
+```{r}
+#| label: ssm1-fit
+#| eval: false
+
+s20_data <- data %>% 
+  filter(Subject == 20) %>% 
+  drop_na(Score) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg)
+
+ssm1 <- cmdstan_model("stan/ssm1.stan")
+  
+ssm1_data <- list(`T` = 65,
+                  y = s20_data, 
+                  m_0 = c(0, 0), 
+                  C_0 = diag(c(10^3, 10^3), 2, 2))
+
+ssm1_fit <- ssm1$sample(data = ssm1_data, 
+                        seed = 20240207,
+                        chains = 4,
+                        parallel_chains = 4,
+                        refresh = 500)
+
+ssm1_fit$save_object(file = "stan/ssm1-fit.RDS")
+```
+
+```{r}
+#| label: ssm1-result
+
+ssm1_fit <- readRDS("stan/ssm1-fit.RDS")
+ssm1_fit$cmdstan_summary()
+```
+
+It seems have enough ESS for each parameters and $\hat{R}$'s are closed to 1.
+
+```{r}
+#| label: plt-obs-pred
+
+y_hat_summary <- ssm1_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Index = str_extract(variable, "\\d+") %>% as.integer(),
+         Affect = str_detect(variable, ",1]") %>% ifelse("Pos", "Neg")) 
+
+
+s20_predict <- subdata %>% 
+  filter(Subject == 20) %>% 
+  drop_na(Score) %>% 
+
+  mutate(Index = rep(1:(n()/2), times = 2)) %>% 
+  left_join(y_hat_summary)
+  
+
+ggplot(s20_predict, aes(x = DateTime, y = Score)) + 
+  geom_line(aes(color = Affect)) + 
+  geom_point(aes(color = Affect)) +
+  scale_color_manual(values = pos_neg_color) +
+  geom_line(aes(y = mean, group = Affect), linetype = "dashed") +
+  geom_ribbon(aes(ymin = q5, ymax = q95, group = Affect), alpha = 0.25) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                   labels = paste("Day", 1:7),
+                   limits = as_datetime(c(1, 8) * 86400))
+```
+
+The fitted lines for both PA and RA capture the observed values for Subject 20.
+
+The posterior distributions of the reliability for positive and negative affect measurement are presented following.
+
+```{r}
+#| label: fig-ssm1-reliability
+#| fig-cap: "The posterior distributions of the reliability for PA and NA and the different between of them ($R^{PA} - R^{NA}$)"
+
+ssm1_draws <- ssm1_fit$draws(format = "df") %>% 
+  mutate(rel_diff = rel_1 - rel_2)
+
+mcmc_areas(ssm1_draws, 
+           pars = c("rel_1", "rel_2", "rel_diff"), 
+           prob = 0.8,
+           prob_outer = 0.99)
+```
+
+## Multilevel extension
+
+### Model Specification
+
+Level 2 (between subject)
+
+$$
+\boldsymbol{\mu} = \begin{pmatrix}\mu_{1 i} \\\mu_{2 i} \end{pmatrix} \sim \mathcal{N} \left(\boldsymbol{\gamma}_\mu = \begin{pmatrix} \gamma_{\mu 1} \\\gamma_{\mu 2} \end{pmatrix}, \boldsymbol{\Psi}_\mu =\begin{pmatrix} \psi_{\mu1}^2 & \psi_{\mu12} \\ \psi_{\mu12} & \psi_{\mu2}^2\end{pmatrix}\right)
+$$
+
+$$
+vec(\boldsymbol{\Phi}_i) = \begin{pmatrix} \phi_{11i} \\ \phi_{12i} \\ \phi_{21i} \\ \phi_{22i} \end{pmatrix} \sim \mathcal{N} \left(\boldsymbol{\gamma}_{\Phi} = \begin{pmatrix}\gamma_{\phi 11} \\ \gamma_{\phi 12} \\ \gamma_{\phi 21} \\ \gamma_{\phi 22} \end{pmatrix}, \boldsymbol{\boldsymbol{\Psi}}_{\phi} = \begin{pmatrix} \psi_{\phi11}^2 & \psi_{\phi11\phi12} & \psi_{\phi11\phi21} & \psi_{\phi11\phi22} \\ \psi_{\phi11\phi12} & \psi_{\phi12}^2 & \psi_{\phi12\phi21} & \psi_{\phi12\phi22} \\ \psi_{\phi21\phi11} & \psi_{\phi21\phi12} & \psi_{\phi21}^2 & \psi_{\phi21\phi22} \\ \psi_{\phi11\phi22} & \psi_{\phi22\phi12} & \psi_{\phi22\phi21} & \psi_{\phi22}^2 \end{pmatrix} \right)
+$$
+
+$$
+vec(upp.tri(\mathbf{R}_i)) = \begin{pmatrix}\sigma_{\epsilon_{11 i}}^{2} \\\sigma_{\epsilon_{12 i}} \\\sigma_{\epsilon_{22 i}}^{2}\end{pmatrix} \sim \mathcal{N} \left(\boldsymbol{\gamma}_{\sigma_\epsilon^2} = \begin{pmatrix} \gamma_{\sigma_{\epsilon 11}^{2}} \\\gamma_{\sigma_{\epsilon 12}} \\ \gamma_{\sigma_{\epsilon 22}^{2}} \end{pmatrix}, \boldsymbol{\Psi}_{\boldsymbol{\sigma}_{\epsilon}^{2}} = \begin{pmatrix} \psi_{\sigma_{\epsilon 11}^2} & & 0 \\ & \psi_{\sigma_{\epsilon 12}} & \\ 0 & & \psi_{\sigma_{\epsilon 22}^2}\end{pmatrix}\right)
+$$
+
+$$
+vec(upp.tri(\mathbf{Q}_i)) = \begin{pmatrix}\sigma_{\omega_{11 i}}^{2} \\\sigma_{\omega_{12 i}} \\\sigma_{\omega_{22 i}}^{2}\end{pmatrix} \sim \mathcal{N} \left(\boldsymbol{\gamma}_{\sigma_\omega^2} = \begin{pmatrix}\gamma_{\sigma_{\omega 11}^{2}} \\\gamma_{\sigma_{\omega 12}} \\\gamma_{\sigma_{\omega 22}^{2}} \end{pmatrix}, \boldsymbol{\Psi}_{\boldsymbol{\sigma}_{\omega}^{2}} = \begin{pmatrix} \psi_{\sigma_{\omega 11}^2} & & 0 \\ & \psi_{\sigma_{\omega 12}} & \\ 0 & & \psi_{\sigma_{\omega 22}^2}\end{pmatrix}\right)
+$$
+
+However, the possible range of $\sigma_{\epsilon 11i}^2$ is $(0, \infty)$ and the one of $\sigma_{\epsilon 12i}$ is $(-\infty, \infty)$. Thus, the
+
+### Reliability
+
+Again, according to @schuurman2019, the reliability for the multilevel MEVAR(1) model have two types:
+
+-   **Reliability for systematic between-subject difference**
+
+$$
+R_k^B = \frac{(\Psi^2_\mu)_{kk}}{Var(\mathbf{y}_k)} = \frac{(\Psi^2_\mu)_{kk}}{(\Psi^2_\mu)_{kk} + E_{i}[(\mathbf{T}_i)_{kk}]+ (\boldsymbol{\gamma}_{\sigma_\epsilon^2})_k} $$
+
+-   **Reliability for within-subject fluctuations**
+
+$$
+R_{ik}^W = \frac{(\mathbf{T}_i)_{kk}}{Var(y_{ik})} = \frac{(\mathbf{T}_i)_{kk}}{(\mathbf{T}_i)_{kk} + (\mathbf{R}_i)_{kk}}
+$$
+
+### Bayesian Estimation
+
+```{cmdstanr filename="multilevel-ssm.stan"}
+#| label: multilevel-MEVAR(1)
+#| output.var: mssm
+#| eval: false
+
+{{< include stan/multilevel-ssm.stan >}}
+
+```
+
+```{r}
+#| label: mssm-fit
+#| eval: false
+
+data_list <- data %>% 
+  filter(Subject %in% c(9, 20, 36, 57, 76, 85)) %>%
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               bind_rows(x, 
+                                         tibble(Pos = rep(Inf, z - y),
+                                                Neg = rep(Inf, z - y))) %>% 
+                                 t()
+                             })) 
+
+
+mssm <- cmdstan_model("stan/multilevel-ssm.stan")
+
+mssm_data <- lst(N = nrow(data_list),
+                 `T` = map(data_list$data, nrow),
+                 max_T = max(data_list$`T`),
+                 P = 2,
+                 y = data_list$data_padding, 
+                 m_0 = rep(list(c(0, 0)), N), 
+                 C_0 = rep(list(diag(c(10^3, 10^3), 2, 2)), N))
+
+mssm_fit <- mssm$sample(data = mssm_data, 
+                        seed = 20240221,
+                        chains = 4,
+                        parallel_chains = 4,
+                        iter_sampling = 3000,
+                        refresh = 1000) 
+                        show_messages = FALSE)
+# mssm_fit$save_object(file = "stan/multilevel-ssm-fit.RDS")
+```
+
+It took me more than 15 hours to finish the sampling ...
+
+```{r}
+#| label: check-ESS-Rhat
+mssm_fit <- readRDS("stan/multilevel-ssm-fit.RDS")
+mssm_fit_summary <- readRDS("stan/multilevel-ssm-summary.RDS")
+
+mssm_fit_summary <- mssm_fit$summary()
+skimr::skim(data.frame(Rhat = as.double(mssm_fit_summary$rhat),
+                       ESS = as.double(mssm_fit_summary$ess_bulk)))
+
+```
+
+However, the most of the ESS are super low. And $\hat{R}$'s are deviated form 1, meaning the MCMC samples are not converged yet. Thus, the posterior results are not reliable.
+
+```{r}
+#| eval: false
+
+
+selected_sub <-  c(9, 20, 36, 57, 76, 85)
+
+y_hat_summary <- mssm_fit$summary("y_hat", mean, median, quantile2) %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) selected_sub[as.integer(x[1])]) %>%  
+           factor(levels = levels(data$Subject)),
+         Affect = map_chr(Indices, \(x) ifelse(x[2] == 1, "Pos", "Neg")),
+         Time_Index = map_dbl(Indices, \(x) as.integer(x[3])))
+  
+data_predict <- data %>% 
+  mutate(DateTime = as_datetime(ymd_hms(paste(as_date(as.double(Day)), 
+                                              as.character(Time))))) %>% 
+  as_tsibble(key = c(Subject, Affect), 
+             index = DateTime) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  group_by(Subject) %>% 
+  mutate(Time_Index = 1:n()) %>% 
+  ungroup() %>% 
+  pivot_longer(c("Pos", "Neg"), names_to = "Affect", values_to = "Score") %>% 
+  left_join(y_hat_summary)
+  # left_join(bind_rows(y_hat_PA_summary, y_hat_NA_summary))
+
+for (i in 1:10) {
+  g <- data_predict %>% 
+    # filter(Subject %in% (10 * (i - 1) + 1):(10 * i)) %>% 
+    filter(Subject %in% selected_sub) %>%
+    ggplot(aes(x = DateTime, y = Score)) + 
+    geom_line(aes(color = Affect)) + 
+    geom_point(aes(color = Affect)) +
+    scale_color_manual(values = pos_neg_color) +
+    geom_line(aes(y = mean, group = Affect), linetype = "dashed") +
+    geom_ribbon(aes(ymin = q5, ymax = q95, group = Affect), alpha = 0.25) +
+    geom_hline(yintercept = c(0, 100), color = "forestgreen") +
+    scale_y_continuous(limits = c(-20, 120)) +
+    scale_x_datetime(breaks = as_datetime(1:7 * 86400),
+                     labels = paste("Day", 1:7),
+                     limits = as_datetime(c(1, 8) * 86400)) +
+    facet_grid(Subject ~ .) 
+  
+  ggsave(filename = str_glue("plots/mssm1/predict_{from}-{to}.png",
+                             from = 10 * (i - 1) + 1, to = 10 * i),
+         plot = g, width = 7, height = 14)
+}
+
+
+```
+
+The fitting recovery results for Subjects 1-20. See the other subject results from [this link](https://1drv.ms/f/s!AlL4lr1NqCjqh-BfCl3xm25exsWCxg?e=NzpgI0).
+
+::: {#fig-fitted-trend layout-ncol="2"}
+![](plots/predict_1-10.png)
+
+![](plots/predict_11-20.png)
+
+Fitting results for Subjects 1-20. The black dashed lines are the fitted values and the gray areas are 95% CI.
+:::
+
+### Within- and Between-Subject Reliability
+
+```{r}
+#| label: geom-violin
+#| echo: false
+
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+```
+
+```{r}
+#| label: fig-within-reliability
+#| eval: false
+
+rel_W_draws <- mssm_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) as.integer(x[1])) %>% 
+           factor(levels = levels(data$Subject)),
+         Affect = map_chr(Indices, \(x) ifelse(x[2] == 1, "Pos", "Neg")))
+
+g_rel_W <- ggplot(rel_W_draws, aes(x = 1, y = value, fill = Affect)) +
+  geom_split_violin() +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = pos_neg_color) +
+  facet_wrap(~ Subject, ncol = 10)
+
+ggsave("plots/rel-W.png", g_rel_W, width = 14, height = 14)
+```
+
+![The posterior distributions of within subject reliability for PA (red) and NA (blue).](plots/rel-W.png){#fig-WR}
+
+```{r}
+#| label: fig-between-reliability
+#| eval: false
+
+rel_B_draws <- mssm_fit$draws(variables = "rel_B", format = "df") %>%
+  mutate(rel_B_diff = `rel_B[1]` - `rel_B[2]`)
+
+g_rel_B <- mcmc_areas(rel_B_draws,
+           prob = 0.8,
+           prob_outer = 0.99) +
+  coord_cartesian(xlim = c(-1.5, 1.5))
+
+ggsave("plots/rel-B.png", g_rel_B)
+```
+
+![](plots/rel-B.png)
+
+## Re-parameterize the model
+
+Refer from: <https://mc-stan.org/docs/stan-users-guide/multivariate-hierarchical-priors.html>
+
+$$
+\mathbf{R} = diag.matrix(\boldsymbol{\tau}_R) \times \boldsymbol{\Omega} \times diag.matrix(\boldsymbol{\tau}_R)
+$$
+
+where $\boldsymbol{\tau}_R$ is the vector of coefficient scale, $\boldsymbol{\Omega}$ is the correlation matrix, which can be decomposed by a product of the lower triangle matrix $\boldsymbol{\Omega_L}$through Cholesky factorization, $\boldsymbol{\Omega}_R = \boldsymbol{\Omega_{RL} \Omega_{RL}'}$, for optimization.
+
+$$\begin{align*}
+\boldsymbol{\tau}_R &\sim Cauchy(loc_{\tau_R}, scale_{\tau_R}) \\
+\boldsymbol{\Omega}_{RL} &\sim LKJ.corr.cholesky(\eta_{\Omega_R})
+\end{align*}$$
+
+The same setting is applied for $\mathbf{Q}$.
+
+```{cmdstanr filename="multilevel-ssm.stan"}
+#| label: multilevel-MEVAR(1)-ver2
+#| output.var: mssm2
+#| eval: false
+
+{{< include stan/multilevel-ssm2.stan >}}
+```
+
+```{r}
+#| label: mssm2-fit
+#| eval: false
+
+mssm2 <- cmdstan_model("stan/multilevel-ssm2.stan")
+
+data_list <- data %>% 
+  #filter(Subject %in% c(1:9, 87)) %>% 
+  group_by(Subject) %>% 
+  pivot_wider(names_from = Affect, values_from = Score) %>% 
+  select(Pos, Neg) %>% 
+  drop_na(Pos, Neg) %>% 
+  nest() %>% ungroup() %>% 
+  mutate(`T` = map_dbl(data, nrow),
+         max_T = max(`T`),
+         data_padding = pmap(list(data, `T`, max_T), 
+                             \(x, y, z) {
+                               bind_rows(x, 
+                                         tibble(Pos = rep(Inf, z - y),
+                                                Neg = rep(Inf, z - y))) %>% 
+                                 t()
+                             }))
+
+
+mssm_data <- lst(N = nrow(data_list),
+                 `T` = map(data_list$data, nrow),
+                 max_T = max(data_list$`T`),
+                 P = 2,
+                 y = data_list$data_padding, 
+                 m_0 = rep(list(c(0, 0)), N), 
+                 C_0 = rep(list(diag(c(10^3, 10^3), 2, 2)), N))
+
+mssm2_fit <- mssm2$sample(data = mssm_data, 
+                          seed = 20240221,
+                          chains = 8,
+                          parallel_chains = 8,
+                          iter_sampling = 1500,
+                          refresh = 1000, 
+                          show_messages = FALSE)
+mssm2_fit$save_object(file = "stan/multilevel-ssm2-fit.RDS")
+saveRDS(mssm2_fit$summary(), "stan/multilevel-ssm2-summary.RDS")
+```
+
+```{r}
+#| label: check-ESS-Rhat2
+#| echo: false
+
+mssm2_fit <- readRDS("stan/multilevel-ssm2-fit.RDS")
+mssm2_fit_summary <- readRDS("stan/multilevel-ssm2-summary.RDS")
+skimr::skim(data.frame(Rhat = as.double(mssm2_fit_summary$rhat),
+                       ESS = as.double(mssm2_fit_summary$ess_bulk)))
+```
+
+```{r}
+#| lavel: fig-within-reliability2
+#| eval: false
+
+rel_W_draws_2 <- mssm2_fit$draws(variables = "rel_W", format = "df") %>%
+  select(-.chain, -.iteration, -.draw) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "variable", values_to = "value") %>% 
+  mutate(Indices = str_extract_all(variable, "\\d+"), 
+         Subject = map_dbl(Indices, \(x) as.integer(x[1])) %>% 
+           factor(levels = levels(data$Subject)),
+         Affect = map_chr(Indices, \(x) ifelse(x[2] == 1, "Pos", "Neg")))
+
+g_rel_W_2 <- ggplot(rel_W_draws_2, aes(x = 1, y = value, fill = Affect)) +
+  geom_split_violin() +
+  scale_x_continuous(name = NULL, labels = NULL, breaks = NULL) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = pos_neg_color) +
+  facet_wrap(~ Subject, ncol = 10)
+
+ggsave("plots/rel-W-2.png", g_rel_W_2, width = 14, height = 14)
+```
+
+![](plots/rel-W-2.png)
+
+```{r}
+#| label: fig-between-reliability2
+#| eval: false
+
+rel_B_draws_2 <- mssm2_fit$draws(variables = "rel_B", format = "df") %>%
+  mutate(rel_B_diff = `rel_B[1]` - `rel_B[2]`)
+
+g_rel_B_2 <- mcmc_areas(rel_B_draws_2,
+           prob = 0.8,
+           prob_outer = 0.99) +
+  coord_cartesian(xlim = c(-1.5, 1.5))
+
+ggsave("plots/rel-B-2.png", g_rel_B_2)
+```
+
+![The posterior distributions of within subject reliability for PA (red) and NA (blue).](plots/rel-B-2.png){#fig-rel-B-2}
+
+![The posterior distributions of within subject reliability for PA (red) and NA (blue).](plots/rel-B-2.png){#fit-rel-B-2}
+
+However, the results are worse than the original one. The main reason is the MCMC samples had not converged yet.
