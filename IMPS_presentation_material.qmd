@@ -1,0 +1,52 @@
+---
+title: "IMPS Presentation Material"
+author: "Tzu-Yao Lin"
+date: last-modified
+bibliography: references.bib
+csl: apa.csl
+execute:
+  warning: false
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    self-contained: true
+    code-fold: false
+    code-tools: true
+---
+
+
+```{r}
+library(tidyverse)
+
+source("data_generation.R")
+
+```
+
+
+```{r}
+gen_data <- generate_ssm_data(N = 3, nT = 100, seed = 20240715)
+
+plot_data <- tibble(y = gen_data$y) |> 
+  mutate(Sub = factor(1:n()),
+         y1 = map(y, ~ .x[1, ]), 
+         y2 = map(y, ~ .x[2, ])) |> 
+  unnest_longer(y1:y2) |> 
+  pivot_longer(y1:y2, names_to = "Var", values_to = "Value") |> 
+  mutate(Time = 1:n(), .by = c(Sub, Var))
+
+plot_data |> 
+  filter(Var == "y2") |> 
+  ggplot(aes(x = Time, y = Value, group = Sub, color = Sub)) +
+  geom_line(linewidth = 2) +
+  scale_color_manual(values = c("gray25", "gray50", "gray75")) +
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+```{r}
+
+```
+
+
